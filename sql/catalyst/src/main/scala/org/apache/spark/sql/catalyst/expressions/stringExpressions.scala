@@ -24,6 +24,7 @@ import java.util.regex.Pattern
 
 import scala.collection.mutable.ArrayBuffer
 
+import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult
 import org.apache.spark.sql.catalyst.expressions.codegen._
@@ -62,15 +63,25 @@ case class Concat(children: Seq[Expression]) extends Expression with ImplicitCas
 
   override protected def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
     val evals = children.map(_.genCode(ctx))
-    val inputs = evals.map { eval =>
-      s"${eval.isNull} ? null : ${eval.value}"
-    }.mkString(", ")
-    ev.copy(evals.map(_.code).mkString("\n") + s"""
-      boolean ${ev.isNull} = false;
-      UTF8String ${ev.value} = UTF8String.concat($inputs);
-      if (${ev.value} == null) {
-        ${ev.isNull} = true;
-      }
+    val args = ctx.freshName("args")
+
+    val inputs = evals.zipWithIndex.map { case (eval, index) =>
+      s"""
+        ${eval.code}
+        if (!${eval.isNull}) {
+          $args[$index] = ${eval.value};
+        }
+      """
+    }
+    val codes = ctx.splitExpressionsWithCurrentInputs(
+      expressions = inputs,
+      funcName = "valueConcat",
+      extraArguments = ("UTF8String[]", args) :: Nil)
+    ev.copy(s"""
+      UTF8String[] $args = new UTF8String[${evals.length}];
+      $codes
+      UTF8String ${ev.value} = UTF8String.concat($args);
+      boolean ${ev.isNull} = ${ev.value} == null;
     """)
   }
 }
@@ -124,13 +135,32 @@ case class ConcatWs(children: Seq[Expression])
     if (children.forall(_.dataType == StringType)) {
       // All children are strings. In that case we can construct a fixed size array.
       val evals = children.map(_.genCode(ctx))
+      val separator = evals.head
+      val strings = evals.tail
+      val numArgs = strings.length
+      val args = ctx.freshName("args")
 
-      val inputs = evals.map { eval =>
-        s"${eval.isNull} ? (UTF8String) null : ${eval.value}"
-      }.mkString(", ")
-
-      ev.copy(evals.map(_.code).mkString("\n") + s"""
-        UTF8String ${ev.value} = UTF8String.concatWs($inputs);
+      val inputs = strings.zipWithIndex.map { case (eval, index) =>
+        if (eval.isNull != "true") {
+          s"""
+             ${eval.code}
+             if (!${eval.isNull}) {
+               $args[$index] = ${eval.value};
+             }
+           """
+        } else {
+          ""
+        }
+      }
+      val codes = ctx.splitExpressionsWithCurrentInputs(
+          expressions = inputs,
+          funcName = "valueConcatWs",
+          extraArguments = ("UTF8String[]", args) :: Nil)
+      ev.copy(s"""
+        UTF8String[] $args = new UTF8String[$numArgs];
+        ${separator.code}
+        $codes
+        UTF8String ${ev.value} = UTF8String.concatWs(${separator.value}, $args);
         boolean ${ev.isNull} = ${ev.value} == null;
       """)
     } else {
@@ -143,32 +173,67 @@ case class ConcatWs(children: Seq[Expression])
         child.dataType match {
           case StringType =>
             ("", // we count all the StringType arguments num at once below.
-              s"$array[$idxInVararg ++] = ${eval.isNull} ? (UTF8String) null : ${eval.value};")
+             if (eval.isNull == "true") {
+               ""
+             } else {
+               s"$array[$idxInVararg ++] = ${eval.isNull} ? (UTF8String) null : ${eval.value};"
+             })
           case _: ArrayType =>
             val size = ctx.freshName("n")
-            (s"""
-              if (!${eval.isNull}) {
-                $varargNum += ${eval.value}.numElements();
-              }
-            """,
-            s"""
-            if (!${eval.isNull}) {
-              final int $size = ${eval.value}.numElements();
-              for (int j = 0; j < $size; j ++) {
-                $array[$idxInVararg ++] = ${ctx.getValue(eval.value, StringType, "j")};
-              }
+            if (eval.isNull == "true") {
+              ("", "")
+            } else {
+              (s"""
+                if (!${eval.isNull}) {
+                  $varargNum += ${eval.value}.numElements();
+                }
+                """,
+               s"""
+                if (!${eval.isNull}) {
+                  final int $size = ${eval.value}.numElements();
+                  for (int j = 0; j < $size; j ++) {
+                    $array[$idxInVararg ++] = ${ctx.getValue(eval.value, StringType, "j")};
+                  }
+                }
+                """)
             }
-            """)
         }
       }.unzip
 
-      ev.copy(evals.map(_.code).mkString("\n") +
-      s"""
+      val codes = ctx.splitExpressionsWithCurrentInputs(evals.map(_.code))
+
+      val varargCounts = ctx.splitExpressionsWithCurrentInputs(
+        expressions = varargCount,
+        funcName = "varargCountsConcatWs",
+        returnType = "int",
+        makeSplitFunction = body =>
+          s"""
+             |int $varargNum = 0;
+             |$body
+             |return $varargNum;
+           """.stripMargin,
+        foldFunctions = _.map(funcCall => s"$varargNum += $funcCall;").mkString("\n"))
+
+      val varargBuilds = ctx.splitExpressionsWithCurrentInputs(
+        expressions = varargBuild,
+        funcName = "varargBuildsConcatWs",
+        extraArguments = ("UTF8String []", array) :: ("int", idxInVararg) :: Nil,
+        returnType = "int",
+        makeSplitFunction = body =>
+          s"""
+             |$body
+             |return $idxInVararg;
+           """.stripMargin,
+        foldFunctions = _.map(funcCall => s"$idxInVararg = $funcCall;").mkString("\n"))
+
+      ev.copy(
+        s"""
+        $codes
         int $varargNum = ${children.count(_.dataType == StringType) - 1};
         int $idxInVararg = 0;
-        ${varargCount.mkString("\n")}
+        $varargCounts
         UTF8String[] $array = new UTF8String[$varargNum];
-        ${varargBuild.mkString("\n")}
+        $varargBuilds
         UTF8String ${ev.value} = UTF8String.concatWs(${evals.head.value}, $array);
         boolean ${ev.isNull} = ${ev.value} == null;
       """)
@@ -223,22 +288,52 @@ case class Elt(children: Seq[Expression])
   override protected def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
     val index = indexExpr.genCode(ctx)
     val strings = stringExprs.map(_.genCode(ctx))
+    val indexVal = ctx.freshName("index")
+    val stringVal = ctx.freshName("stringVal")
     val assignStringValue = strings.zipWithIndex.map { case (eval, index) =>
       s"""
         case ${index + 1}:
-          ${ev.value} = ${eval.isNull} ? null : ${eval.value};
+          ${eval.code}
+          $stringVal = ${eval.isNull} ? null : ${eval.value};
           break;
       """
-    }.mkString("\n")
-    val indexVal = ctx.freshName("index")
-    val stringArray = ctx.freshName("strings");
+    }
 
-    ev.copy(index.code + "\n" + strings.map(_.code).mkString("\n") + s"""
-      final int $indexVal = ${index.value};
-      UTF8String ${ev.value} = null;
-      switch ($indexVal) {
-        $assignStringValue
+    val cases = ctx.buildCodeBlocks(assignStringValue)
+    val codes = if (cases.length == 1) {
+      s"""
+        UTF8String $stringVal = null;
+        switch ($indexVal) {
+          ${cases.head}
+        }
+       """
+    } else {
+      var prevFunc = "null"
+      for (c <- cases.reverse) {
+        val funcName = ctx.freshName("eltFunc")
+        val funcBody = s"""
+         private UTF8String $funcName(InternalRow ${ctx.INPUT_ROW}, int $indexVal) {
+           UTF8String $stringVal = null;
+           switch ($indexVal) {
+             $c
+             default:
+               return $prevFunc;
+           }
+           return $stringVal;
+         }
+        """
+        val fullFuncName = ctx.addNewFunction(funcName, funcBody)
+        prevFunc = s"$fullFuncName(${ctx.INPUT_ROW}, $indexVal)"
       }
+      s"UTF8String $stringVal = $prevFunc;"
+    }
+
+    ev.copy(
+      s"""
+      ${index.code}
+      final int $indexVal = ${index.value};
+      $codes
+      UTF8String ${ev.value} = $stringVal;
       final boolean ${ev.isNull} = ${ev.value} == null;
     """)
   }
@@ -483,7 +578,7 @@ case class StringTranslate(srcExpr: Expression, matchingExpr: Expression, replac
       > SELECT _FUNC_('ab','abc,b,ab,c,def');
        3
   """)
-// scalastyle:on
+// scalastyle:on line.size.limit
 case class FindInSet(left: Expression, right: Expression) extends BinaryExpression
     with ImplicitCastInputTypes {
 
@@ -503,69 +598,330 @@ case class FindInSet(left: Expression, right: Expression) extends BinaryExpressi
   override def prettyName: String = "find_in_set"
 }
 
+trait String2TrimExpression extends Expression with ImplicitCastInputTypes {
+
+  override def dataType: DataType = StringType
+  override def inputTypes: Seq[AbstractDataType] = Seq.fill(children.size)(StringType)
+
+  override def nullable: Boolean = children.exists(_.nullable)
+  override def foldable: Boolean = children.forall(_.foldable)
+}
+
+object StringTrim {
+  def apply(str: Expression, trimStr: Expression) : StringTrim = StringTrim(str, Some(trimStr))
+  def apply(str: Expression) : StringTrim = StringTrim(str, None)
+}
+
 /**
- * A function that trim the spaces from both ends for the specified string.
+ * A function that takes a character string, removes the leading and trailing characters matching
+ * with any character in the trim string, returns the new string.
+ * If BOTH and trimStr keywords are not specified, it defaults to remove space character from both
+ * ends. The trim function will have one argument, which contains the source string.
+ * If BOTH and trimStr keywords are specified, it trims the characters from both ends, and the trim
+ * function will have two arguments, the first argument contains trimStr, the second argument
+ * contains the source string.
+ * trimStr: A character string to be trimmed from the source string, if it has multiple characters,
+ * the function searches for each character in the source string, removes the characters from the
+ * source string until it encounters the first non-match character.
+ * BOTH: removes any character from both ends of the source string that matches characters in the
+ * trim string.
  */
 @ExpressionDescription(
-  usage = "_FUNC_(str) - Removes the leading and trailing space characters from `str`.",
+  usage = """
+    _FUNC_(str) - Removes the leading and trailing space characters from `str`.
+
+    _FUNC_(BOTH trimStr FROM str) - Remove the leading and trailing `trimStr` characters from `str`
+
+    _FUNC_(LEADING trimStr FROM str) - Remove the leading `trimStr` characters from `str`
+
+    _FUNC_(TRAILING trimStr FROM str) - Remove the trailing `trimStr` characters from `str`
+  """,
+  arguments = """
+    Arguments:
+      * str - a string expression
+      * trimStr - the trim string characters to trim, the default value is a single space
+      * BOTH, FROM - these are keywords to specify trimming string characters from both ends of
+          the string
+      * LEADING, FROM - these are keywords to specify trimming string characters from the left
+          end of the string
+      * TRAILING, FROM - these are keywords to specify trimming string characters from the right
+          end of the string
+  """,
   examples = """
     Examples:
       > SELECT _FUNC_('    SparkSQL   ');
        SparkSQL
+      > SELECT _FUNC_('SL', 'SSparkSQLS');
+       parkSQ
+      > SELECT _FUNC_(BOTH 'SL' FROM 'SSparkSQLS');
+       parkSQ
+      > SELECT _FUNC_(LEADING 'SL' FROM 'SSparkSQLS');
+       parkSQLS
+      > SELECT _FUNC_(TRAILING 'SL' FROM 'SSparkSQLS');
+       SSparkSQ
   """)
-case class StringTrim(child: Expression)
-  extends UnaryExpression with String2StringExpression {
+case class StringTrim(
+    srcStr: Expression,
+    trimStr: Option[Expression] = None)
+  extends String2TrimExpression {
 
-  def convert(v: UTF8String): UTF8String = v.trim()
+  def this(trimStr: Expression, srcStr: Expression) = this(srcStr, Option(trimStr))
+
+  def this(srcStr: Expression) = this(srcStr, None)
 
   override def prettyName: String = "trim"
 
+  override def children: Seq[Expression] = if (trimStr.isDefined) {
+    srcStr :: trimStr.get :: Nil
+  } else {
+    srcStr :: Nil
+  }
+  override def eval(input: InternalRow): Any = {
+    val srcString = srcStr.eval(input).asInstanceOf[UTF8String]
+    if (srcString == null) {
+      null
+    } else {
+      if (trimStr.isDefined) {
+        srcString.trim(trimStr.get.eval(input).asInstanceOf[UTF8String])
+      } else {
+        srcString.trim()
+      }
+    }
+  }
+
   override def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
-    defineCodeGen(ctx, ev, c => s"($c).trim()")
+    val evals = children.map(_.genCode(ctx))
+    val srcString = evals(0)
+
+    if (evals.length == 1) {
+      ev.copy(evals.map(_.code).mkString + s"""
+        boolean ${ev.isNull} = false;
+        UTF8String ${ev.value} = null;
+        if (${srcString.isNull}) {
+          ${ev.isNull} = true;
+        } else {
+          ${ev.value} = ${srcString.value}.trim();
+        }""")
+    } else {
+      val trimString = evals(1)
+      val getTrimFunction =
+        s"""
+        if (${trimString.isNull}) {
+          ${ev.isNull} = true;
+        } else {
+          ${ev.value} = ${srcString.value}.trim(${trimString.value});
+        }"""
+      ev.copy(evals.map(_.code).mkString + s"""
+        boolean ${ev.isNull} = false;
+        UTF8String ${ev.value} = null;
+        if (${srcString.isNull}) {
+          ${ev.isNull} = true;
+        } else {
+          $getTrimFunction
+        }""")
+    }
   }
 }
 
-/**
- * A function that trim the spaces from left end for given string.
- */
-@ExpressionDescription(
-  usage = "_FUNC_(str) - Removes the leading and trailing space characters from `str`.",
-  examples = """
-    Examples:
-      > SELECT _FUNC_('    SparkSQL');
-       SparkSQL
-  """)
-case class StringTrimLeft(child: Expression)
-  extends UnaryExpression with String2StringExpression {
-
-  def convert(v: UTF8String): UTF8String = v.trimLeft()
-
-  override def prettyName: String = "ltrim"
-
-  override def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
-    defineCodeGen(ctx, ev, c => s"($c).trimLeft()")
-  }
+object StringTrimLeft {
+  def apply(str: Expression, trimStr: Expression): StringTrimLeft =
+    StringTrimLeft(str, Some(trimStr))
+  def apply(str: Expression): StringTrimLeft = StringTrimLeft(str, None)
 }
 
 /**
- * A function that trim the spaces from right end for given string.
+ * A function that trims the characters from left end for a given string.
+ * If LEADING and trimStr keywords are not specified, it defaults to remove space character from
+ * the left end. The ltrim function will have one argument, which contains the source string.
+ * If LEADING and trimStr keywords are not specified, it trims the characters from left end. The
+ * ltrim function will have two arguments, the first argument contains trimStr, the second argument
+ * contains the source string.
+ * trimStr: the function removes any character from the left end of the source string which matches
+ * with the characters from trimStr, it stops at the first non-match character.
+ * LEADING: removes any character from the left end of the source string that matches characters in
+ * the trim string.
  */
 @ExpressionDescription(
-  usage = "_FUNC_(str) - Removes the trailing space characters from `str`.",
+  usage = """
+    _FUNC_(str) - Removes the leading space characters from `str`.
+
+    _FUNC_(trimStr, str) - Removes the leading string contains the characters from the trim string
+  """,
+  arguments = """
+    Arguments:
+      * str - a string expression
+      * trimStr - the trim string characters to trim, the default value is a single space
+  """,
   examples = """
     Examples:
       > SELECT _FUNC_('    SparkSQL   ');
-           SparkSQL
+       SparkSQL
+      > SELECT _FUNC_('Sp', 'SSparkSQLS');
+       arkSQLS
   """)
-case class StringTrimRight(child: Expression)
-  extends UnaryExpression with String2StringExpression {
+case class StringTrimLeft(
+    srcStr: Expression,
+    trimStr: Option[Expression] = None)
+  extends String2TrimExpression {
 
-  def convert(v: UTF8String): UTF8String = v.trimRight()
+  def this(trimStr: Expression, srcStr: Expression) = this(srcStr, Option(trimStr))
+
+  def this(srcStr: Expression) = this(srcStr, None)
+
+  override def prettyName: String = "ltrim"
+
+  override def children: Seq[Expression] = if (trimStr.isDefined) {
+    srcStr :: trimStr.get :: Nil
+  } else {
+    srcStr :: Nil
+  }
+
+  override def eval(input: InternalRow): Any = {
+    val srcString = srcStr.eval(input).asInstanceOf[UTF8String]
+    if (srcString == null) {
+      null
+    } else {
+      if (trimStr.isDefined) {
+        srcString.trimLeft(trimStr.get.eval(input).asInstanceOf[UTF8String])
+      } else {
+        srcString.trimLeft()
+      }
+    }
+  }
+
+  override protected def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
+    val evals = children.map(_.genCode(ctx))
+    val srcString = evals(0)
+
+    if (evals.length == 1) {
+      ev.copy(evals.map(_.code).mkString + s"""
+        boolean ${ev.isNull} = false;
+        UTF8String ${ev.value} = null;
+        if (${srcString.isNull}) {
+          ${ev.isNull} = true;
+        } else {
+          ${ev.value} = ${srcString.value}.trimLeft();
+        }""")
+    } else {
+      val trimString = evals(1)
+      val getTrimLeftFunction =
+        s"""
+        if (${trimString.isNull}) {
+          ${ev.isNull} = true;
+        } else {
+          ${ev.value} = ${srcString.value}.trimLeft(${trimString.value});
+        }"""
+      ev.copy(evals.map(_.code).mkString + s"""
+        boolean ${ev.isNull} = false;
+        UTF8String ${ev.value} = null;
+        if (${srcString.isNull}) {
+          ${ev.isNull} = true;
+        } else {
+          $getTrimLeftFunction
+        }""")
+    }
+  }
+}
+
+object StringTrimRight {
+  def apply(str: Expression, trimStr: Expression): StringTrimRight =
+    StringTrimRight(str, Some(trimStr))
+  def apply(str: Expression) : StringTrimRight = StringTrimRight(str, None)
+}
+
+/**
+ * A function that trims the characters from right end for a given string.
+ * If TRAILING and trimStr keywords are not specified, it defaults to remove space character
+ * from the right end. The rtrim function will have one argument, which contains the source string.
+ * If TRAILING and trimStr keywords are specified, it trims the characters from right end. The
+ * rtrim function will have two arguments, the first argument contains trimStr, the second argument
+ * contains the source string.
+ * trimStr: the function removes any character from the right end of source string which matches
+ * with the characters from trimStr, it stops at the first non-match character.
+ * TRAILING: removes any character from the right end of the source string that matches characters
+ * in the trim string.
+ */
+// scalastyle:off line.size.limit
+@ExpressionDescription(
+  usage = """
+    _FUNC_(str) - Removes the trailing space characters from `str`.
+
+    _FUNC_(trimStr, str) - Removes the trailing string which contains the characters from the trim string from the `str`
+  """,
+  arguments = """
+    Arguments:
+      * str - a string expression
+      * trimStr - the trim string characters to trim, the default value is a single space
+  """,
+  examples = """
+    Examples:
+      > SELECT _FUNC_('    SparkSQL   ');
+       SparkSQL
+      > SELECT _FUNC_('LQSa', 'SSparkSQLS');
+       SSpark
+  """)
+// scalastyle:on line.size.limit
+case class StringTrimRight(
+    srcStr: Expression,
+    trimStr: Option[Expression] = None)
+  extends String2TrimExpression {
+
+  def this(trimStr: Expression, srcStr: Expression) = this(srcStr, Option(trimStr))
+
+  def this(srcStr: Expression) = this(srcStr, None)
 
   override def prettyName: String = "rtrim"
 
-  override def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
-    defineCodeGen(ctx, ev, c => s"($c).trimRight()")
+  override def children: Seq[Expression] = if (trimStr.isDefined) {
+    srcStr :: trimStr.get :: Nil
+  } else {
+    srcStr :: Nil
+  }
+
+  override def eval(input: InternalRow): Any = {
+    val srcString = srcStr.eval(input).asInstanceOf[UTF8String]
+    if (srcString == null) {
+      null
+    } else {
+      if (trimStr.isDefined) {
+        srcString.trimRight(trimStr.get.eval(input).asInstanceOf[UTF8String])
+      } else {
+        srcString.trimRight()
+      }
+    }
+  }
+
+  override protected def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
+    val evals = children.map(_.genCode(ctx))
+    val srcString = evals(0)
+
+    if (evals.length == 1) {
+      ev.copy(evals.map(_.code).mkString + s"""
+        boolean ${ev.isNull} = false;
+        UTF8String ${ev.value} = null;
+        if (${srcString.isNull}) {
+          ${ev.isNull} = true;
+        } else {
+          ${ev.value} = ${srcString.value}.trimRight();
+        }""")
+    } else {
+      val trimString = evals(1)
+      val getTrimRightFunction =
+        s"""
+        if (${trimString.isNull}) {
+          ${ev.isNull} = true;
+        } else {
+          ${ev.value} = ${srcString.value}.trimRight(${trimString.value});
+        }"""
+      ev.copy(evals.map(_.code).mkString + s"""
+        boolean ${ev.isNull} = false;
+        UTF8String ${ev.value} = null;
+        if (${srcString.isNull}) {
+          ${ev.isNull} = true;
+        } else {
+          $getTrimRightFunction
+        }""")
+    }
   }
 }
 
@@ -576,6 +932,7 @@ case class StringTrimRight(child: Expression)
  *
  * NOTE: that this is not zero based, but 1-based index. The first character in str has index 1.
  */
+// scalastyle:off line.size.limit
 @ExpressionDescription(
   usage = "_FUNC_(str, substr) - Returns the (1-based) index of the first occurrence of `substr` in `str`.",
   examples = """
@@ -583,6 +940,7 @@ case class StringTrimRight(child: Expression)
       > SELECT _FUNC_('SparkSQL', 'SQL');
        6
   """)
+// scalastyle:on line.size.limit
 case class StringInstr(str: Expression, substr: Expression)
   extends BinaryExpression with ImplicitCastInputTypes {
 
@@ -1007,10 +1365,10 @@ case class FormatString(children: Expression*) extends Expression with ImplicitC
     val pattern = children.head.genCode(ctx)
 
     val argListGen = children.tail.map(x => (x.dataType, x.genCode(ctx)))
-    val argListCode = argListGen.map(_._2.code + "\n")
-
-    val argListString = argListGen.foldLeft("")((s, v) => {
-      val nullSafeString =
+    val argList = ctx.freshName("argLists")
+    val numArgLists = argListGen.length
+    val argListCode = argListGen.zipWithIndex.map { case(v, index) =>
+      val value =
         if (ctx.boxedType(v._1) != ctx.javaType(v._1)) {
           // Java primitives get boxed in order to allow null values.
           s"(${v._2.isNull}) ? (${ctx.boxedType(v._1)}) null : " +
@@ -1018,8 +1376,15 @@ case class FormatString(children: Expression*) extends Expression with ImplicitC
         } else {
           s"(${v._2.isNull}) ? null : ${v._2.value}"
         }
-      s + "," + nullSafeString
-    })
+      s"""
+         ${v._2.code}
+         $argList[$index] = $value;
+       """
+    }
+    val argListCodes = ctx.splitExpressionsWithCurrentInputs(
+      expressions = argListCode,
+      funcName = "valueFormatString",
+      extraArguments = ("Object[]", argList) :: Nil)
 
     val form = ctx.freshName("formatter")
     val formatter = classOf[java.util.Formatter].getName
@@ -1030,10 +1395,11 @@ case class FormatString(children: Expression*) extends Expression with ImplicitC
       boolean ${ev.isNull} = ${pattern.isNull};
       ${ctx.javaType(dataType)} ${ev.value} = ${ctx.defaultValue(dataType)};
       if (!${ev.isNull}) {
-        ${argListCode.mkString}
         $stringBuffer $sb = new $stringBuffer();
         $formatter $form = new $formatter($sb, ${classOf[Locale].getName}.US);
-        $form.format(${pattern.value}.toString() $argListString);
+        Object[] $argList = new Object[$numArgLists];
+        $argListCodes
+        $form.format(${pattern.value}.toString(), $argList);
         ${ev.value} = UTF8String.fromString($sb.toString());
       }""")
   }
@@ -1701,7 +2067,7 @@ case class FormatNumber(x: Expression, d: Expression)
       val numberFormat = ctx.freshName("numberFormat")
       val i = ctx.freshName("i")
       val dFormat = ctx.freshName("dFormat")
-      ctx.addMutableState("int", lastDValue, s"$lastDValue = -100;")
+      ctx.addMutableState(ctx.JAVA_INT, lastDValue, s"$lastDValue = -100;")
       ctx.addMutableState(sb, pattern, s"$pattern = new $sb();")
       ctx.addMutableState(df, numberFormat,
       s"""$numberFormat = new $df("", new $dfs($l.$usLocale));""")

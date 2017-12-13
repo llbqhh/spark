@@ -63,7 +63,7 @@ object GenerateMutableProjection extends CodeGenerator[Seq[Expression], MutableP
         if (e.nullable) {
           val isNull = s"isNull_$i"
           val value = s"value_$i"
-          ctx.addMutableState("boolean", isNull, s"$isNull = true;")
+          ctx.addMutableState(ctx.JAVA_BOOLEAN, isNull, s"$isNull = true;")
           ctx.addMutableState(ctx.javaType(e.dataType), value,
             s"$value = ${ctx.defaultValue(e.dataType)};")
           s"""
@@ -91,8 +91,8 @@ object GenerateMutableProjection extends CodeGenerator[Seq[Expression], MutableP
         ctx.updateColumn("mutableRow", e.dataType, i, ev, e.nullable)
     }
 
-    val allProjections = ctx.splitExpressions(ctx.INPUT_ROW, projectionCodes)
-    val allUpdates = ctx.splitExpressions(ctx.INPUT_ROW, updates)
+    val allProjections = ctx.splitExpressionsWithCurrentInputs(projectionCodes)
+    val allUpdates = ctx.splitExpressionsWithCurrentInputs(updates)
 
     val codeBody = s"""
       public java.lang.Object generate(Object[] references) {
@@ -142,7 +142,7 @@ object GenerateMutableProjection extends CodeGenerator[Seq[Expression], MutableP
       new CodeAndComment(codeBody, ctx.getPlaceHolderToComments()))
     logDebug(s"code for ${expressions.mkString(",")}:\n${CodeFormatter.format(code)}")
 
-    val c = CodeGenerator.compile(code)
-    c.generate(ctx.references.toArray).asInstanceOf[MutableProjection]
+    val (clazz, _) = CodeGenerator.compile(code)
+    clazz.generate(ctx.references.toArray).asInstanceOf[MutableProjection]
   }
 }

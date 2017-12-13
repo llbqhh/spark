@@ -212,6 +212,15 @@ To use a custom metrics.properties for the application master and executors, upd
   </td>
 </tr>
 <tr>
+  <td><code>spark.yarn.dist.forceDownloadSchemes</code></td>
+  <td><code>(none)</code></td>
+  <td>
+    Comma-separated list of schemes for which files will be downloaded to the local disk prior to 
+    being added to YARN's distributed cache. For use in cases where the YARN service does not 
+    support schemes that are supported by Spark, like http, https and ftp.
+  </td>
+</tr>
+<tr>
  <td><code>spark.executor.instances</code></td>
   <td><code>2</code></td>
   <td>
@@ -219,24 +228,10 @@ To use a custom metrics.properties for the application master and executors, upd
   </td>
 </tr>
 <tr>
- <td><code>spark.yarn.executor.memoryOverhead</code></td>
-  <td>executorMemory * 0.10, with minimum of 384 </td>
-  <td>
-    The amount of off-heap memory (in megabytes) to be allocated per executor. This is memory that accounts for things like VM overheads, interned strings, other native overheads, etc. This tends to grow with the executor size (typically 6-10%).
-  </td>
-</tr>
-<tr>
-  <td><code>spark.yarn.driver.memoryOverhead</code></td>
-  <td>driverMemory * 0.10, with minimum of 384 </td>
-  <td>
-    The amount of off-heap memory (in megabytes) to be allocated per driver in cluster mode. This is memory that accounts for things like VM overheads, interned strings, other native overheads, etc. This tends to grow with the container size (typically 6-10%).
-  </td>
-</tr>
-<tr>
   <td><code>spark.yarn.am.memoryOverhead</code></td>
   <td>AM memory * 0.10, with minimum of 384 </td>
   <td>
-    Same as <code>spark.yarn.driver.memoryOverhead</code>, but for the YARN Application Master in client mode.
+    Same as <code>spark.driver.memoryOverhead</code>, but for the YARN Application Master in client mode.
   </td>
 </tr>
 <tr>
@@ -390,6 +385,15 @@ To use a custom metrics.properties for the application master and executors, upd
   <td>(none)</td>
   <td>
   Principal to be used to login to KDC, while running on secure HDFS. (Works also with the "local" master)
+  </td>
+</tr>
+<tr>
+  <td><code>spark.yarn.kerberos.relogin.period</code></td>
+  <td>1m</td>
+  <td>
+  How often to check whether the kerberos TGT should be renewed. This should be set to a value
+  that is shorter than the TGT renewal period (or the TGT lifetime if TGT renewal is not enabled).
+  The default value should be enough for most deployments.
   </td>
 </tr>
 <tr>

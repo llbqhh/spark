@@ -309,6 +309,17 @@ class SparkContextSuite extends SparkFunSuite with LocalSparkContext with Eventu
     assert(sc.listJars().head.contains(tmpJar.getName))
   }
 
+  test("SPARK-22585 addJar argument without scheme is interpreted literally without url decoding") {
+    val tmpDir = new File(Utils.createTempDir(), "host%3A443")
+    tmpDir.mkdirs()
+    val tmpJar = File.createTempFile("t%2F", ".jar", tmpDir)
+
+    sc = new SparkContext("local", "test")
+
+    sc.addJar(tmpJar.getAbsolutePath)
+    assert(sc.listJars().size === 1)
+  }
+
   test("Cancelling job group should not cause SparkContext to shutdown (SPARK-6414)") {
     try {
       sc = new SparkContext(new SparkConf().setAppName("test").setMaster("local"))
@@ -539,6 +550,12 @@ class SparkContextSuite extends SparkFunSuite with LocalSparkContext with Eventu
     }
   }
 
+  test("client mode with a k8s master url") {
+    intercept[SparkException] {
+      sc = new SparkContext("k8s://https://host:port", "test", new SparkConf())
+    }
+  }
+
   testCancellingTasks("that raise interrupted exception on cancel") {
     Thread.sleep(9999999)
   }
@@ -600,6 +617,7 @@ class SparkContextSuite extends SparkFunSuite with LocalSparkContext with Eventu
     val fs = new DebugFilesystem()
     fs.initialize(new URI("file:///"), new Configuration())
     val file = File.createTempFile("SPARK19446", "temp")
+    file.deleteOnExit()
     Files.write(Array.ofDim[Byte](1000), file)
     val path = new Path("file:///" + file.getCanonicalPath)
     val stream = fs.open(path)

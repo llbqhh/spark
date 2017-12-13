@@ -17,7 +17,7 @@
 
 package org.apache.spark.sql.hive.client
 
-import java.io.{ByteArrayOutputStream, File, PrintStream}
+import java.io.{ByteArrayOutputStream, File, PrintStream, PrintWriter}
 import java.net.URI
 
 import org.apache.hadoop.conf.Configuration
@@ -73,7 +73,7 @@ class VersionsSuite extends SparkFunSuite with Logging {
   }
 
   test("success sanity check") {
-    val badClient = buildClient(HiveUtils.hiveExecutionVersion, new Configuration())
+    val badClient = buildClient(HiveUtils.builtinHiveVersion, new Configuration())
     val db = new CatalogDatabase("default", "desc", new URI("loc"), Map())
     badClient.createDatabase(db, ignoreIfExists = true)
   }
@@ -81,7 +81,7 @@ class VersionsSuite extends SparkFunSuite with Logging {
   test("hadoop configuration preserved") {
     val hadoopConf = new Configuration()
     hadoopConf.set("test", "success")
-    val client = buildClient(HiveUtils.hiveExecutionVersion, hadoopConf)
+    val client = buildClient(HiveUtils.builtinHiveVersion, hadoopConf)
     assert("success" === client.getConf("test", null))
   }
 
@@ -127,7 +127,7 @@ class VersionsSuite extends SparkFunSuite with Logging {
         hadoopConf.set("datanucleus.schema.autoCreateAll", "true")
         hadoopConf.set("hive.metastore.schema.verification", "false")
       }
-      client = buildClient(version, hadoopConf, HiveUtils.hiveClientConfigurations(hadoopConf))
+      client = buildClient(version, hadoopConf, HiveUtils.formatTimeVarsForHiveClient(hadoopConf))
       if (versionSpark != null) versionSpark.reset()
       versionSpark = TestHiveVersion(client)
       assert(versionSpark.sharedState.externalCatalog.asInstanceOf[HiveExternalCatalog].client
@@ -232,10 +232,47 @@ class VersionsSuite extends SparkFunSuite with Logging {
       assert(client.getTable("default", "src").properties.contains("changed"))
     }
 
-    test(s"$version: alterTable(tableName: String, table: CatalogTable)") {
+    test(s"$version: alterTable(dbName: String, tableName: String, table: CatalogTable)") {
       val newTable = client.getTable("default", "src").copy(properties = Map("changedAgain" -> ""))
-      client.alterTable("src", newTable)
+      client.alterTable("default", "src", newTable)
       assert(client.getTable("default", "src").properties.contains("changedAgain"))
+    }
+
+    test(s"$version: alterTable - rename") {
+      val newTable = client.getTable("default", "src")
+        .copy(identifier = TableIdentifier("tgt", database = Some("default")))
+      assert(!client.tableExists("default", "tgt"))
+
+      client.alterTable("default", "src", newTable)
+
+      assert(client.tableExists("default", "tgt"))
+      assert(!client.tableExists("default", "src"))
+    }
+
+    test(s"$version: alterTable - change database") {
+      val tempDB = CatalogDatabase(
+        "temporary", description = "test create", tempDatabasePath, Map())
+      client.createDatabase(tempDB, ignoreIfExists = true)
+
+      val newTable = client.getTable("default", "tgt")
+        .copy(identifier = TableIdentifier("tgt", database = Some("temporary")))
+      assert(!client.tableExists("temporary", "tgt"))
+
+      client.alterTable("default", "tgt", newTable)
+
+      assert(client.tableExists("temporary", "tgt"))
+      assert(!client.tableExists("default", "tgt"))
+    }
+
+    test(s"$version: alterTable - change database and table names") {
+      val newTable = client.getTable("temporary", "tgt")
+        .copy(identifier = TableIdentifier("src", database = Some("default")))
+      assert(!client.tableExists("default", "src"))
+
+      client.alterTable("temporary", "tgt", newTable)
+
+      assert(client.tableExists("default", "src"))
+      assert(!client.tableExists("temporary", "tgt"))
     }
 
     test(s"$version: listTables(database)") {
@@ -763,6 +800,114 @@ class VersionsSuite extends SparkFunSuite with Logging {
       }
     }
 
+    test(s"$version: read avro file containing decimal") {
+      val url = Thread.currentThread().getContextClassLoader.getResource("avroDecimal")
+      val location = new File(url.getFile)
+
+      val tableName = "tab1"
+      val avroSchema =
+        """{
+          |  "name": "test_record",
+          |  "type": "record",
+          |  "fields": [ {
+          |    "name": "f0",
+          |    "type": [
+          |      "null",
+          |      {
+          |        "precision": 38,
+          |        "scale": 2,
+          |        "type": "bytes",
+          |        "logicalType": "decimal"
+          |      }
+          |    ]
+          |  } ]
+          |}
+        """.stripMargin
+      withTable(tableName) {
+        versionSpark.sql(
+          s"""
+             |CREATE TABLE $tableName
+             |ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.avro.AvroSerDe'
+             |WITH SERDEPROPERTIES ('respectSparkSchema' = 'true')
+             |STORED AS
+             |  INPUTFORMAT 'org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat'
+             |  OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat'
+             |LOCATION '$location'
+             |TBLPROPERTIES ('avro.schema.literal' = '$avroSchema')
+           """.stripMargin
+        )
+        assert(versionSpark.table(tableName).collect() ===
+          versionSpark.sql("SELECT 1.30").collect())
+      }
+    }
+
+    test(s"$version: SPARK-17920: Insert into/overwrite avro table") {
+      withTempDir { dir =>
+        val avroSchema =
+          """
+            |{
+            |  "name": "test_record",
+            |  "type": "record",
+            |  "fields": [{
+            |    "name": "f0",
+            |    "type": [
+            |      "null",
+            |      {
+            |        "precision": 38,
+            |        "scale": 2,
+            |        "type": "bytes",
+            |        "logicalType": "decimal"
+            |      }
+            |    ]
+            |  }]
+            |}
+          """.stripMargin
+        val schemaFile = new File(dir, "avroDecimal.avsc")
+        val writer = new PrintWriter(schemaFile)
+        writer.write(avroSchema)
+        writer.close()
+        val schemaPath = schemaFile.getCanonicalPath
+
+        val url = Thread.currentThread().getContextClassLoader.getResource("avroDecimal")
+        val srcLocation = new File(url.getFile).getCanonicalPath
+        val destTableName = "tab1"
+        val srcTableName = "tab2"
+
+        withTable(srcTableName, destTableName) {
+          versionSpark.sql(
+            s"""
+               |CREATE EXTERNAL TABLE $srcTableName
+               |ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.avro.AvroSerDe'
+               |WITH SERDEPROPERTIES ('respectSparkSchema' = 'true')
+               |STORED AS
+               |  INPUTFORMAT 'org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat'
+               |  OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat'
+               |LOCATION '$srcLocation'
+               |TBLPROPERTIES ('avro.schema.url' = '$schemaPath')
+           """.stripMargin
+          )
+
+          versionSpark.sql(
+            s"""
+               |CREATE TABLE $destTableName
+               |ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.avro.AvroSerDe'
+               |WITH SERDEPROPERTIES ('respectSparkSchema' = 'true')
+               |STORED AS
+               |  INPUTFORMAT 'org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat'
+               |  OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat'
+               |TBLPROPERTIES ('avro.schema.url' = '$schemaPath')
+           """.stripMargin
+          )
+          versionSpark.sql(
+            s"""INSERT OVERWRITE TABLE $destTableName SELECT * FROM $srcTableName""")
+          val result = versionSpark.table(srcTableName).collect()
+          assert(versionSpark.table(destTableName).collect() === result)
+          versionSpark.sql(
+            s"""INSERT INTO TABLE $destTableName SELECT * FROM $srcTableName""")
+          assert(versionSpark.table(destTableName).collect().toSeq === result ++ result)
+        }
+      }
+    }
     // TODO: add more tests.
   }
 }
