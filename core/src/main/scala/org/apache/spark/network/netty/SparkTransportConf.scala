@@ -54,10 +54,14 @@ object SparkTransportConf {
     // Specify thread configuration based on our JVM's allocation of cores (rather than necessarily
     // assuming we have all the machine's cores).
     // NB: Only set if serverThreads/clientThreads not already set.
+
+    //netty可用的线程数
     val numThreads = defaultNumThreads(numUsableCores)
+    //rpc
     conf.setIfMissing(s"spark.$module.io.serverThreads", numThreads.toString)
     conf.setIfMissing(s"spark.$module.io.clientThreads", numThreads.toString)
 
+    //传入了rpc
     new TransportConf(module, new ConfigProvider {
       override def get(name: String): String = conf.get(name)
       override def get(name: String, defaultValue: String): String = conf.get(name, defaultValue)

@@ -128,6 +128,7 @@ private[netty] class Dispatcher(nettyEnv: NettyRpcEnv) extends Logging {
   def postLocalMessage(message: RequestMessage, p: Promise[Any]): Unit = {
     val rpcCallContext =
       new LocalNettyRpcCallContext(message.senderAddress, p)
+    //包装成RpcMessage
     val rpcMessage = RpcMessage(message.senderAddress, message.content, rpcCallContext)
     postMessage(message.receiver.name, rpcMessage, (e) => p.tryFailure(e))
   }
@@ -156,7 +157,9 @@ private[netty] class Dispatcher(nettyEnv: NettyRpcEnv) extends Logging {
       } else if (data == null) {
         Some(new SparkException(s"Could not find $endpointName."))
       } else {
+        //发送消息
         data.inbox.post(message)
+        //向receivers中添加消息，通知inbox消费这条消息   =》  219
         receivers.offer(data)
         None
       }
@@ -180,6 +183,7 @@ private[netty] class Dispatcher(nettyEnv: NettyRpcEnv) extends Logging {
   }
 
   def awaitTermination(): Unit = {
+    //treadpool是懒加载的，这时候才真正启动
     threadpool.awaitTermination(Long.MaxValue, TimeUnit.MILLISECONDS)
   }
 
@@ -192,10 +196,12 @@ private[netty] class Dispatcher(nettyEnv: NettyRpcEnv) extends Logging {
 
   /** Thread pool used for dispatching messages. */
   private val threadpool: ThreadPoolExecutor = {
+    //初始化dispatcher轮询发件箱线程数
     val numThreads = nettyEnv.conf.getInt("spark.rpc.netty.dispatcher.numThreads",
       math.max(2, Runtime.getRuntime.availableProcessors()))
     val pool = ThreadUtils.newDaemonFixedThreadPool(numThreads, "dispatcher-event-loop")
     for (i <- 0 until numThreads) {
+      //这里开始轮询receivers
       pool.execute(new MessageLoop)
     }
     pool
@@ -208,6 +214,7 @@ private[netty] class Dispatcher(nettyEnv: NettyRpcEnv) extends Logging {
         while (true) {
           try {
             val data = receivers.take()
+            //如果接收到PoisonPill则会退出循环
             if (data == PoisonPill) {
               // Put PoisonPill back so that other MessageLoops can see it.
               receivers.offer(PoisonPill)

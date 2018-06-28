@@ -128,6 +128,8 @@ private[deploy] class Master(
   override def onStart(): Unit = {
     logInfo("Starting Spark master at " + masterUrl)
     logInfo(s"Running Spark version ${org.apache.spark.SPARK_VERSION}")
+
+    //创建webui，为用户使用
     webUi = new MasterWebUI(this, webUiPort)
     webUi.bind()
     masterWebUiUrl = "http://" + masterPublicAddress + ":" + webUi.boundPort
@@ -136,18 +138,22 @@ private[deploy] class Master(
       logInfo(s"Spark Master is acting as a reverse proxy. Master, Workers and " +
        s"Applications UIs are available at $masterWebUiUrl")
     }
+
+    //定时检查worker是否超市
     checkForWorkerTimeOutTask = forwardMessageThread.scheduleAtFixedRate(new Runnable {
       override def run(): Unit = Utils.tryLogNonFatalError {
         self.send(CheckForWorkerTimeOut)
       }
     }, 0, WORKER_TIMEOUT_MS, TimeUnit.MILLISECONDS)
 
+    //启动RestServer
     if (restServerEnabled) {
       val port = conf.getInt("spark.master.rest.port", 6066)
       restServer = Some(new StandaloneRestServer(address.host, port, conf, self, masterUrl))
     }
     restServerBoundPort = restServer.map(_.start())
 
+    //资源监控
     masterMetricsSystem.registerSource(masterSource)
     masterMetricsSystem.start()
     applicationMetricsSystem.start()
@@ -157,6 +163,7 @@ private[deploy] class Master(
     applicationMetricsSystem.getServletHandlers.foreach(webUi.attachHandler)
 
     val serializer = new JavaSerializer(conf)
+    //初始化持久化引擎和选举引擎（元数据）
     val (persistenceEngine_, leaderElectionAgent_) = RECOVERY_MODE match {
       case "ZOOKEEPER" =>
         logInfo("Persisting recovery state to ZooKeeper")
@@ -1031,6 +1038,7 @@ private[deploy] object Master extends Logging {
     val conf = new SparkConf
     val args = new MasterArguments(argStrings, conf)
     val (rpcEnv, _, _) = startRpcEnvAndEndpoint(args.host, args.port, args.webUiPort, conf)
+    //这里实际启动了master节点
     rpcEnv.awaitTermination()
   }
 
@@ -1045,10 +1053,15 @@ private[deploy] object Master extends Logging {
       port: Int,
       webUiPort: Int,
       conf: SparkConf): (RpcEnv, Int, Option[Int]) = {
+    //创建SecurityManager负责权限控制
     val securityMgr = new SecurityManager(conf)
+    //创建了一个NettyRpcEnv
     val rpcEnv = RpcEnv.create(SYSTEM_NAME, host, port, conf, securityMgr)
+    //注册master的Endpoint，返回master的NettyRpcEndpointRef
     val masterEndpoint = rpcEnv.setupEndpoint(ENDPOINT_NAME,
+      //创建Master时，将webUiPort传入
       new Master(rpcEnv, rpcEnv.address, webUiPort, securityMgr, conf))
+    //发送BoundPortsResponse的消息，实际调用NettyRpcEndpointRef的ask方法
     val portsResponse = masterEndpoint.askSync[BoundPortsResponse](BoundPortsRequest)
     (rpcEnv, portsResponse.webUIPort, portsResponse.restPort)
   }

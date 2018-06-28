@@ -33,6 +33,7 @@ import org.apache.spark.util.RpcUtils
  */
 private[spark] object RpcEnv {
 
+  //返回一个NettyRpcEnv
   def create(
       name: String,
       host: String,
@@ -66,6 +67,12 @@ private[spark] object RpcEnv {
  * sender, or logging them if no such sender or `NotSerializableException`.
  *
  * [[RpcEnv]] also provides some methods to retrieve [[RpcEndpointRef]]s given name or uri.
+  *
+  * RPC上下文环境，每个[RpcEndpoint]运行时依赖的上下文环境称之为RpcEnv
+  *
+  * [RpcEndpoint]需要注册一个名称到[RpcEnv]来接收消息。
+  * 然后，[RpcEnv]将处理从[RpcEndpointRef]或远程节点发送的消息，
+  * 并将它们传递给相应的[RpcEndpoint]。
  */
 private[spark] abstract class RpcEnv(conf: SparkConf) {
 
@@ -105,6 +112,7 @@ private[spark] abstract class RpcEnv(conf: SparkConf) {
    * This is a blocking action.
    */
   def setupEndpointRef(address: RpcAddress, endpointName: String): RpcEndpointRef = {
+    //在这里将address和endpointName(master)拼成了 s"spark://$endpointName@${rpcAddress.host}:${rpcAddress.port}"
     setupEndpointRefByURI(RpcEndpointAddress(address, endpointName).toString)
   }
 

@@ -50,6 +50,7 @@ class SparkClassCommandBuilder extends AbstractCommandBuilder {
     // Master, Worker, HistoryServer, ExternalShuffleService, MesosClusterDispatcher use
     // SPARK_DAEMON_JAVA_OPTS (and specific opts) + SPARK_DAEMON_MEMORY.
     switch (className) {
+      //配置不同类型进程所需的参数
       case "org.apache.spark.deploy.master.Master":
         javaOptsKeys.add("SPARK_DAEMON_JAVA_OPTS");
         javaOptsKeys.add("SPARK_MASTER_OPTS");

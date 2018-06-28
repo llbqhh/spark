@@ -84,6 +84,9 @@ class Main {
 
     Map<String, String> env = new HashMap<>();
     List<String> cmd = builder.buildCommand(env);
+    //在log日志中可以看到
+    //Spark Command: /export/App/jdk1.8.0_60/bin/java -cp /export/App/xdata-spark/conf/:/export/App/xdata-spark/jars/*:/export/App/hadoop-2.6.1/etc/hadoop/ -Xmx1g org.apache.spark.deploy.master.M
+    //aster --host llb-test-linux --port 7077 --webui-port 8080
     if (printLaunchCommand) {
       System.err.println("Spark Command: " + join(" ", cmd));
       System.err.println("========================================");

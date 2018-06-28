@@ -77,6 +77,7 @@ private[netty] class Inbox(
   private var numActiveThreads = 0
 
   // OnStart should be the first message to process
+  //Master、Worker等都将首先因此调用onStart方法
   inbox.synchronized {
     messages.add(OnStart)
   }
@@ -102,6 +103,7 @@ private[netty] class Inbox(
         message match {
           case RpcMessage(_sender, content, context) =>
             try {
+              //找到相关的endpoint(Master? Worker?)的receiveAndReply
               endpoint.receiveAndReply(context).applyOrElse[Any, Unit](content, { msg =>
                 throw new SparkException(s"Unsupported message $message from ${_sender}")
               })

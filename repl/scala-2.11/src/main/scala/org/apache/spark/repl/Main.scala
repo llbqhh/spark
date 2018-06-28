@@ -71,6 +71,7 @@ object Main extends Logging {
     settings.processArguments(interpArguments, true)
 
     if (!hasErrors) {
+      //调用ILoop的process方法，其中的loadFiles和printWelcome调用的SparkILoop中的方法
       interp.process(settings) // Repl starts and goes in loop of R.E.P.L
       Option(sparkContext).foreach(_.stop)
     }

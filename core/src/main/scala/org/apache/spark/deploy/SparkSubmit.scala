@@ -109,6 +109,7 @@ object SparkSubmit extends CommandLineUtils {
   // scalastyle:on println
 
   override def main(args: Array[String]): Unit = {
+    //解析参数
     val appArgs = new SparkSubmitArguments(args)
     if (appArgs.verbose) {
       // scalastyle:off println
@@ -150,6 +151,7 @@ object SparkSubmit extends CommandLineUtils {
    */
   @tailrec
   private def submit(args: SparkSubmitArguments): Unit = {
+    //准备运行环境，这里确定client类的具体类型
     val (childArgs, childClasspath, sysProps, childMainClass) = prepareSubmitEnvironment(args)
 
     def doRunMain(): Unit = {
@@ -186,6 +188,7 @@ object SparkSubmit extends CommandLineUtils {
      //   (2) The new REST-based gateway introduced in Spark 1.3
      // The latter is the default behavior as of Spark 1.3, but Spark submit will fail over
      // to use the legacy gateway if the master endpoint turns out to be not a REST server.
+    //如果有配置useRest参数，则使用rest方式提交（RestSubmissionClient类），如果失败，再改用传统方式提交
     if (args.isStandaloneCluster && args.useRest) {
       try {
         // scalastyle:off println
@@ -688,6 +691,8 @@ object SparkSubmit extends CommandLineUtils {
     }
     // scalastyle:on println
 
+
+    //初始化环境
     val loader =
       if (sysProps.getOrElse("spark.driver.userClassPathFirst", "false").toBoolean) {
         new ChildFirstURLClassLoader(new Array[URL](0),
@@ -697,11 +702,9 @@ object SparkSubmit extends CommandLineUtils {
           Thread.currentThread.getContextClassLoader)
       }
     Thread.currentThread.setContextClassLoader(loader)
-
     for (jar <- childClasspath) {
       addJarToClasspath(jar, loader)
     }
-
     for ((key, value) <- sysProps) {
       System.setProperty(key, value)
     }
@@ -751,6 +754,7 @@ object SparkSubmit extends CommandLineUtils {
         e
     }
 
+    //执行入真正入口类的main方法
     try {
       mainMethod.invoke(null, childArgs.toArray)
     } catch {

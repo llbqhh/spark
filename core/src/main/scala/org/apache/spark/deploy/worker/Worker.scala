@@ -196,14 +196,23 @@ private[deploy] class Worker(
       host, port, cores, Utils.megabytesToString(memory)))
     logInfo(s"Running Spark version ${org.apache.spark.SPARK_VERSION}")
     logInfo("Spark home: " + sparkHome)
+
+    //创建工作目录
     createWorkDir()
+
+    //提供一个服务器，执行器可以读取shuffle文件(而不是直接从彼此读取)，
+    //以在执行程序关闭或被杀死时提供不间断的访问文件。
     shuffleService.startIfEnabled()
+
+    //启动webui
     webUi = new WorkerWebUI(this, workDir, webUiPort)
     webUi.bind()
-
     workerWebUiUrl = s"http://$publicAddress:${webUi.boundPort}"
+
+    //向master注册自己
     registerWithMaster()
 
+    //监控资源使用
     metricsSystem.registerSource(workerSource)
     metricsSystem.start()
     // Attach the worker metrics servlet handler to the web ui after the metrics system is started.
@@ -238,7 +247,9 @@ private[deploy] class Worker(
         override def run(): Unit = {
           try {
             logInfo("Connecting to master " + masterAddress + "...")
+            //最终调用了NettyRpcEnv =》 144
             val masterEndpoint = rpcEnv.setupEndpointRef(masterAddress, Master.ENDPOINT_NAME)
+            //向master发送RegisterWorker消息
             sendRegisterMessageToMaster(masterEndpoint)
           } catch {
             case ie: InterruptedException => // Cancelled
@@ -350,6 +361,7 @@ private[deploy] class Worker(
         registered = false
         registerMasterFutures = tryRegisterAllMasters()
         connectionAttemptCount = 0
+        //定期执行ReregisterWithMaster
         registrationRetryTimer = Some(forwordMessageScheduler.scheduleAtFixedRate(
           new Runnable {
             override def run(): Unit = Utils.tryLogNonFatalError {
@@ -366,6 +378,7 @@ private[deploy] class Worker(
   }
 
   private def sendRegisterMessageToMaster(masterEndpoint: RpcEndpointRef): Unit = {
+    //实际调用NettyRpcEndpointRef =》 543
     masterEndpoint.send(RegisterWorker(
       workerId,
       host,
@@ -387,11 +400,15 @@ private[deploy] class Worker(
         }
         registered = true
         changeMaster(masterRef, masterWebUiUrl, masterAddress)
+
+        //定期发送心跳
         forwordMessageScheduler.scheduleAtFixedRate(new Runnable {
           override def run(): Unit = Utils.tryLogNonFatalError {
             self.send(SendHeartbeat)
           }
         }, 0, HEARTBEAT_MILLIS, TimeUnit.MILLISECONDS)
+
+        //如果有配置，清理workDir
         if (CLEANUP_ENABLED) {
           logInfo(
             s"Worker cleanup enabled; old application directories will be deleted in: $workDir")
@@ -402,6 +419,10 @@ private[deploy] class Worker(
           }, CLEANUP_INTERVAL_MILLIS, CLEANUP_INTERVAL_MILLIS, TimeUnit.MILLISECONDS)
         }
 
+        //向master发送WorkerLatestState
+//        A worker will send this message to the master when it registers with the master. Then the
+//     master will compare them with the executors and drivers in the master and tell the worker to
+//     kill the unknown executors and drivers.
         val execs = executors.values.map { e =>
           new ExecutorDescription(e.appId, e.execId, e.cores, e.state)
         }
@@ -420,6 +441,7 @@ private[deploy] class Worker(
 
   override def receive: PartialFunction[Any, Unit] = synchronized {
     case msg: RegisterWorkerResponse =>
+      //RegisteredWorker、RegisterWorkerFailed等类都是RegisterWorkerResponse的实现类
       handleRegisterResponse(msg)
 
     case SendHeartbeat =>
@@ -740,6 +762,7 @@ private[deploy] object Worker extends Logging {
     Utils.initDaemon(log)
     val conf = new SparkConf
     val args = new WorkerArguments(argStrings, conf)
+//    创建rpcEnv
     val rpcEnv = startRpcEnvAndEndpoint(args.host, args.port, args.webUiPort, args.cores,
       args.memory, args.masters, args.workDir, conf = conf)
     rpcEnv.awaitTermination()
@@ -758,9 +781,13 @@ private[deploy] object Worker extends Logging {
 
     // The LocalSparkCluster runs multiple local sparkWorkerX RPC Environments
     val systemName = SYSTEM_NAME + workerNumber.map(_.toString).getOrElse("")
+    //创建SecurityManager负责权限控制
     val securityMgr = new SecurityManager(conf)
+    //创建了一个NettyRpcEnv
     val rpcEnv = RpcEnv.create(systemName, host, port, conf, securityMgr)
+    //创建master的RpcAddress
     val masterAddresses = masterUrls.map(RpcAddress.fromSparkURL(_))
+    //注册worker的Endpoint，返回worker的NettyRpcEndpointRef
     rpcEnv.setupEndpoint(ENDPOINT_NAME, new Worker(rpcEnv, webUiPort, cores, memory,
       masterAddresses, ENDPOINT_NAME, workDir, conf, securityMgr))
     rpcEnv

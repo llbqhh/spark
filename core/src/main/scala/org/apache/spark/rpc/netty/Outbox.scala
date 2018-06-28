@@ -178,6 +178,7 @@ private[netty] class Outbox(nettyEnv: NettyRpcEnv, val address: RpcAddress) {
           return
         }
         message = messages.poll()
+        //把messages里的消息全部处理以后就退出循环，避免一直占用资源
         if (message == null) {
           draining = false
           return
@@ -191,6 +192,7 @@ private[netty] class Outbox(nettyEnv: NettyRpcEnv, val address: RpcAddress) {
 
       override def call(): Unit = {
         try {
+//          NettyRpcEnv => 208
           val _client = nettyEnv.createClient(address)
           outbox.synchronized {
             client = _client

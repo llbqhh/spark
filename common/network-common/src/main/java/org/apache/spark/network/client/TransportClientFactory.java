@@ -56,6 +56,10 @@ import org.apache.spark.network.util.TransportConf;
  *
  * TransportClients will be reused whenever possible. Prior to completing the creation of a new
  * TransportClient, all given {@link TransportClientBootstrap}s will be run.
+ *
+ * 工厂维护一个连接池到其他主机，并且应该返回相同的传输客户端到相同的远程主机。
+ * 它还为所有传输客户机共享一个线程池。
+ * 只要有可能，传输客户机就会被重用。在完成一个新的传输客户机的创建之前，将运行所有给定的{@ link传输程序。
  */
 public class TransportClientFactory implements Closeable {
 
