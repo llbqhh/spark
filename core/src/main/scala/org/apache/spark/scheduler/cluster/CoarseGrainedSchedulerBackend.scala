@@ -566,6 +566,8 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
     defaultAskTimeout.awaitResult(response)
   }
 
+
+
   /**
    * Request executors from the cluster manager by specifying the total number desired,
    * including existing pending and running executors.
@@ -676,6 +678,18 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
   }
 
   protected def fetchHadoopDelegationTokens(): Option[Array[Byte]] = { None }
+
+  /**
+   * 实时获取可用的最大executor数量
+   *
+   * @return
+   */
+  def caculateMaxNumExecutors(): Integer =
+    defaultAskTimeout.awaitResult(caculateMaxNumExecutorsInternal)
+
+  def caculateMaxNumExecutorsInternal(): Future[Integer] =
+    Future.successful(Integer.MAX_VALUE)
+
 }
 
 private[spark] object CoarseGrainedSchedulerBackend {

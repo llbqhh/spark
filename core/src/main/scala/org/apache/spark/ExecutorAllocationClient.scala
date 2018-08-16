@@ -47,6 +47,12 @@ private[spark] trait ExecutorAllocationClient {
       hostToLocalTaskCount: Map[String, Int]): Boolean
 
   /**
+   * Get max num of available executors.
+   * @return
+   */
+  def caculateMaxNumExecutors(): Integer
+
+  /**
    * Request an additional number of executors from the cluster manager.
    * @return whether the request is acknowledged by the cluster manager.
    */

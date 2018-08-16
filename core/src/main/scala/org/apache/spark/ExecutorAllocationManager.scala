@@ -18,13 +18,12 @@
 package org.apache.spark
 
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.util.control.{ControlThrowable, NonFatal}
-
 import com.codahale.metrics.{Gauge, MetricRegistry}
-
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.{DYN_ALLOCATION_MAX_EXECUTORS, DYN_ALLOCATION_MIN_EXECUTORS}
 import org.apache.spark.metrics.source.Source
@@ -90,7 +89,7 @@ private[spark] class ExecutorAllocationManager(
 
   // Lower and upper bounds on the number of executors.
   private val minNumExecutors = conf.get(DYN_ALLOCATION_MIN_EXECUTORS)
-  private val maxNumExecutors = conf.get(DYN_ALLOCATION_MAX_EXECUTORS)
+  private val maxNumExecutors = new AtomicInteger(conf.get(DYN_ALLOCATION_MAX_EXECUTORS))
   private val initialNumExecutors = Utils.getDynamicAllocationInitialExecutors(conf)
 
   // How long there must be backlogged tasks for before an addition is triggered (seconds)
@@ -174,13 +173,13 @@ private[spark] class ExecutorAllocationManager(
    * If not, throw an appropriate exception.
    */
   private def validateSettings(): Unit = {
-    if (minNumExecutors < 0 || maxNumExecutors < 0) {
+    if (minNumExecutors < 0 || maxNumExecutors.get() < 0) {
       throw new SparkException("spark.dynamicAllocation.{min/max}Executors must be positive!")
     }
     if (maxNumExecutors == 0) {
       throw new SparkException("spark.dynamicAllocation.maxExecutors cannot be 0!")
     }
-    if (minNumExecutors > maxNumExecutors) {
+    if (minNumExecutors > maxNumExecutors.get()) {
       throw new SparkException(s"spark.dynamicAllocation.minExecutors ($minNumExecutors) must " +
         s"be less than or equal to spark.dynamicAllocation.maxExecutors ($maxNumExecutors)!")
     }
@@ -231,9 +230,36 @@ private[spark] class ExecutorAllocationManager(
         }
       }
     }
+
+    if (conf.getBoolean("spark.dynamicAllocation.updateMaxNumExecutorsTask.enable", false)) {
+      val percent = conf.getDouble("spark.dynamicAllocation.updateMaxNumExecutorsTask.percent", 1.0)
+      logInfo("spark.dynamicAllocation.updateMaxNumExecutorsTask.enable ,percent is " + percent)
+      val updateMaxNumExecutorsTask = new Runnable() {
+        override def run(): Unit = {
+          try {
+            maxNumExecutors.set(caculateMaxNumExecutors)
+          } catch {
+            case ct: ControlThrowable =>
+              throw ct
+            case t: Throwable =>
+              logWarning(s"Uncaught exception in thread ${Thread.currentThread().getName}", t)
+          }
+        }
+      }
+      executor.scheduleWithFixedDelay(
+        updateMaxNumExecutorsTask, 0, intervalMillis, TimeUnit.SECONDS)
+    }
+
     executor.scheduleWithFixedDelay(scheduleTask, 0, intervalMillis, TimeUnit.MILLISECONDS)
 
     client.requestTotalExecutors(numExecutorsTarget, localityAwareTasks, hostToLocalTaskCount)
+  }
+
+  def caculateMaxNumExecutors() : Integer = {
+    val percent = conf.getDouble("spark.dynamicAllocation.updateMaxNumExecutorsTask.percent", 1.0)
+    val executors = (client.caculateMaxNumExecutors() * percent).toInt
+    logInfo(s"caculateMaxNumExecutors ok ($executors)")
+    executors
   }
 
   /**
@@ -354,7 +380,7 @@ private[spark] class ExecutorAllocationManager(
    */
   private def addExecutors(maxNumExecutorsNeeded: Int): Int = {
     // Do not request more executors if it would put our target over the upper bound
-    if (numExecutorsTarget >= maxNumExecutors) {
+    if (numExecutorsTarget >= maxNumExecutors.get()) {
       logDebug(s"Not adding executors because our current target total " +
         s"is already $numExecutorsTarget (limit $maxNumExecutors)")
       numExecutorsToAdd = 1
@@ -370,7 +396,8 @@ private[spark] class ExecutorAllocationManager(
     // Ensure that our target doesn't exceed what we need at the present moment:
     numExecutorsTarget = math.min(numExecutorsTarget, maxNumExecutorsNeeded)
     // Ensure that our target fits within configured bounds:
-    numExecutorsTarget = math.max(math.min(numExecutorsTarget, maxNumExecutors), minNumExecutors)
+    numExecutorsTarget = math.max(
+      math.min(numExecutorsTarget, maxNumExecutors.get()), minNumExecutors)
 
     val delta = numExecutorsTarget - oldNumExecutorsTarget
 
@@ -380,7 +407,7 @@ private[spark] class ExecutorAllocationManager(
       // Check if there is any speculative jobs pending
       if (listener.pendingTasks == 0 && listener.pendingSpeculativeTasks > 0) {
         numExecutorsTarget =
-          math.max(math.min(maxNumExecutorsNeeded + 1, maxNumExecutors), minNumExecutors)
+          math.max(math.min(maxNumExecutorsNeeded + 1, maxNumExecutors.get()), minNumExecutors)
       } else {
         numExecutorsToAdd = 1
         return 0

@@ -24,7 +24,6 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import scala.concurrent.Future
 import scala.util.{Failure, Success}
 import scala.util.control.NonFatal
-
 import org.apache.spark.SparkConf
 import org.apache.spark.deploy.{ApplicationDescription, ExecutorState}
 import org.apache.spark.deploy.DeployMessages._
@@ -48,6 +47,7 @@ private[spark] class StandaloneAppClient(
     listener: StandaloneAppClientListener,
     conf: SparkConf)
   extends Logging {
+
 
   private val masterRpcAddresses = masterUrls.map(RpcAddress.fromSparkURL(_))
 
@@ -215,15 +215,24 @@ private[spark] class StandaloneAppClient(
             logWarning("Attempted to kill executors before registering with Master.")
             context.reply(false)
         }
+
+      case c: CaculateMaxNumExecutors =>
+        master match {
+          case Some(m) => askAndReplyAsync(m, context, c, Int)
+          case None =>
+            logWarning("Attempted to caculate maxNumExecutors before registering with Master.")
+            context.reply(false)
+        }
     }
 
     private def askAndReplyAsync[T](
-        endpointRef: RpcEndpointRef,
-        context: RpcCallContext,
-        msg: T): Unit = {
+       endpointRef: RpcEndpointRef,
+       context: RpcCallContext,
+       msg: T,
+       askType: AnyRef = Boolean): Unit = {
       // Ask a message and create a thread to reply with the result.  Allow thread to be
       // interrupted during shutdown, otherwise context must be notified of NonFatal errors.
-      endpointRef.ask[Boolean](msg).andThen {
+      endpointRef.ask[askType.type](msg).andThen {
         case Success(b) => context.reply(b)
         case Failure(ie: InterruptedException) => // Cancelled
         case Failure(NonFatal(t)) => context.sendFailure(t)
@@ -317,4 +326,18 @@ private[spark] class StandaloneAppClient(
     }
   }
 
+  /**
+    * Get max num of available executors.
+    * @return
+    */
+  def caculateMaxNumExecutors(): Future[Integer] = {
+    if (endpoint.get != null && appId.get != null) {
+      val maxNumExecutors = endpoint.get.ask[Integer](CaculateMaxNumExecutors(appId.get))
+      logInfo(s"Application $appId caculateMaxNumExecutors ok ($maxNumExecutors).")
+      maxNumExecutors
+    } else {
+      logWarning("Attempted to kill executors before driver fully initialized.")
+      Future.successful(Integer.MAX_VALUE)
+    }
+  }
 }

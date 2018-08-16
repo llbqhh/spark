@@ -491,6 +491,9 @@ private[deploy] class Master(
     case RequestExecutors(appId, requestedTotal) =>
       context.reply(handleRequestExecutors(appId, requestedTotal))
 
+    case CaculateMaxNumExecutors(appId) =>
+      context.reply(handelCaculateMaxNumExecutors(appId))
+
     case KillExecutors(appId, executorIds) =>
       val formattedExecutorIds = formatExecutorIds(executorIds)
       context.reply(handleKillExecutors(appId, formattedExecutorIds))
@@ -906,6 +909,34 @@ private[deploy] class Master(
       case None =>
         logWarning(s"Unknown application $appId requested $requestedTotal total executors.")
         false
+    }
+  }
+
+  /**
+    * Get max num of available executors.
+    * @return
+    */
+  private def handelCaculateMaxNumExecutors(appId: String): Integer = {
+    idToApp.get(appId) match {
+      case Some(appInfo) =>
+        logInfo(s"Application $appId caculateMaxNumExecutors.")
+        val aliveWorkers = workers.toSeq.filter(_.state == WorkerState.ALIVE)
+        var coresNum = 0;
+        var memoryNum = 0;
+        for (worker <- aliveWorkers) {
+          coresNum += worker.coresFree
+          memoryNum += worker.memoryFree
+        }
+        coresNum += appInfo.executors.size * appInfo.desc.coresPerExecutor.getOrElse(1)
+        memoryNum += appInfo.executors.size * appInfo.desc.memoryPerExecutorMB
+        val maxExecutorsByCores = coresNum / appInfo.desc.coresPerExecutor.getOrElse(1)
+        val maxExecutorsByMemory = memoryNum / appInfo.desc.memoryPerExecutorMB
+        val maxNumExecutors = Math.min(maxExecutorsByCores, maxExecutorsByMemory)
+        logInfo(s"Application $appId caculateMaxNumExecutors ok ($maxNumExecutors).")
+        maxNumExecutors
+      case None =>
+        logWarning(s"Unknown application $appId caculateMaxNumExecutors.")
+        Integer.MAX_VALUE
     }
   }
 
