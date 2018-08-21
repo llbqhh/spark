@@ -1212,4 +1212,12 @@ private class DummyLocalSchedulerBackend (sc: SparkContext, sb: SchedulerBackend
   override def killExecutorsOnHost(host: String): Boolean = {
     false
   }
+
+  /**
+    * Get max num of available executors.
+    *
+    * @return
+    */
+  override def caculateMaxNumExecutors(): Integer =
+    Integer.MAX_VALUE
 }

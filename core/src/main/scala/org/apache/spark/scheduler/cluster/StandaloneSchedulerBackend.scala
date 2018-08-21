@@ -193,8 +193,23 @@ private[spark] class StandaloneSchedulerBackend(
   }
 
   /**
+    * Get max num of available executors.
+    *
+    * @return
+    */
+  override def caculateMaxNumExecutorsInternal(): Future[Integer] = {
+    Option(client) match {
+      case Some(c) => c.caculateMaxNumExecutors()
+      case None =>
+        logWarning("Attempted to request executors before driver fully initialized.")
+        Future.successful(Integer.MAX_VALUE)
+    }
+  }
+
+  /**
    * Kill the given list of executors through the Master.
-   * @return whether the kill request is acknowledged.
+    *
+    * @return whether the kill request is acknowledged.
    */
   protected override def doKillExecutors(executorIds: Seq[String]): Future[Boolean] = {
     Option(client) match {

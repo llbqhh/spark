@@ -142,6 +142,8 @@ private[deploy] object DeployMessages {
 
   case class RequestExecutors(appId: String, requestedTotal: Int)
 
+  case class CaculateMaxNumExecutors(appId: String)
+
   case class KillExecutors(appId: String, executorIds: Seq[String])
 
   // Master to AppClient

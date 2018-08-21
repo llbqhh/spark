@@ -27,7 +27,7 @@ private[spark] class WorkerInfo(
     val host: String,
     val port: Int,
     val cores: Int,
-    val memory: Int,
+    val memory: Int, // mb，可以从Utils.DEFAULT_DRIVER_MEM_MB中看出
     val endpoint: RpcEndpointRef,
     val webUiAddress: String)
   extends Serializable {
