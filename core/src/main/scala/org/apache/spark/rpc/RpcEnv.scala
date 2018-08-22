@@ -33,7 +33,7 @@ import org.apache.spark.util.RpcUtils
  */
 private[spark] object RpcEnv {
 
-  //返回一个NettyRpcEnv
+  // 返回一个NettyRpcEnv
   def create(
       name: String,
       host: String,
